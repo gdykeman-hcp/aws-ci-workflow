@@ -1,0 +1,54 @@
+---
+- name: Configure Web Server
+  hosts: all
+  become: yes
+  gather_facts: no
+
+  tasks:
+    - name: debug vault var
+      ansible.builtin.debug:
+        msg: "{{ vault_var }}"
+      run_once: yes
+  
+    - name: Read the latest version of a kv2 secret from Vault via the remote host with userpass auth
+      community.hashi_vault.vault_kv2_get:
+        url: "{{ vault_url }}"
+        path: "{{ vault_secret_path }}"
+        auth_method: "{{ vault_auth_method }}"
+        username: "{{ vault_username }}"
+        password: '{{ vault_password }}'
+        namespace: "{{ vault_namespace }}"
+        engine_mount_point: "{{ vault_engine_mount_point }}"
+      register: secret
+
+    - name: Install packages
+      ansible.builtin.yum:
+        name: "{{ packages }}"
+        state: present
+
+    - name: create site-enabled directory
+      ansible.builtin.file:
+        name: /etc/httpd/conf/sites-enabled
+        state: directory
+
+    - name: Synchronization over html directory
+      ansible.posix.synchronize:
+        src: files/apache/
+        dest: /var/www/html/
+
+    - name: template html
+      ansible.builtin.template:
+        src: templates/version{{release}}.j2
+        dest: /var/www/html/index.html
+  
+    - name: Start Apache
+      ansible.builtin.service:
+        name: httpd
+        state: started
+        enabled: yes
+
+
+    # - name: copy over html directory
+    #   ansible.builtin.copy:
+    #     src: files/apache/
+    #     dest: /var/www/html/

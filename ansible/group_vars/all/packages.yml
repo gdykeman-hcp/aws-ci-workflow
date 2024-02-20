@@ -1,0 +1,7 @@
+---
+packages:
+  - httpd
+  - mod_wsgi
+  - firewalld
+
+release: 2

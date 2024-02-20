@@ -1,0 +1,24 @@
+ansible/ansible.cfg
+#  Local .terraform directories
+**/.terraform/*
+**/gitlab-runner/*
+.terraform*
+terraform.tfvars
+# Prevent accidentally committing gcp credentials
+*.json
+
+# Files from admin script
+team_id
+team_token
+workspace_id
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Emacs files:
+*~
+\#*\#
+
+# zip files
+*.tar.gz

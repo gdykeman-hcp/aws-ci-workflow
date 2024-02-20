@@ -1,0 +1,128 @@
+include:
+  remote: https://raw.githubusercontent.com/hashicorp/tfc-workflows-gitlab/v1.1.1/Base.gitlab-ci.yml
+
+variables:
+  PROJECT_PIPELINE_NAME: "aws-ci-workflow"  # A default is not required.
+
+stages:
+  - .pre
+  - build
+  - deploy
+  - vault
+  - configure
+
+workflow:
+  name: "$PROJECT_PIPELINE_NAME"
+  rules:
+    # If the current branch is the default branch. Workflows on the main branch perform non-speculative terraform apply.
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      when: always
+      variables:
+        PROJECT_PIPELINE_NAME: "$CI_DEFAULT_BRANCH pipeline"
+        PLAN_ONLY: "false"
+        SPECULATIVE: "false"
+    # Workflows on merge requests only do a plan run.
+    # Alternatively, you could trigger a plan run on any push, if: $CI_PIPELINE_SOURCE == "push"
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+      when: always
+      variables:
+        PROJECT_PIPELINE_NAME: "Merge Request pipeline: $CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"
+        PLAN_ONLY: "true"
+        SPECULATIVE: "true"
+
+upload_configuration:
+  stage: ".pre"
+  extends: .tfc:upload_configuration
+
+create_run:
+  stage: "build"
+  extends: .tfc:create_run
+  variables:
+    MESSAGE: "LGTM"
+
+apply_run:
+  stage: "deploy"
+  extends: .tfc:apply_run
+  variables:
+    COMMENT: "LGTM"
+  rules:
+    - if: $CI_COMMIT_REF_NAME == $CI_DEFAULT_BRANCH
+      when: on_success
+
+## Jobs that run when a merge request is created
+plan_output:
+  stage: "deploy"
+  extends: .tfc:plan_output
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Calls GitLab API to submit comments on a merge request.
+# Variable GITLAB_API_TOKEN needs to be defined to use this job. Please refer: https://docs.gitlab.com/ee/user/project/settings/project_access_tokens.html
+comment_on_merge_request:
+  stage: ".post"
+  image: alpine/curl
+  variables:
+    MR_COMMENT: |
+      Run Status: "${run_status}"
+      Plan: ${add} to add, ${change} to change, ${destroy} to destroy.
+      [Terraform Cloud Plan](${run_link})
+  script:
+    - 'curl --fail-with-body --request POST --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes" --data-urlencode "body=$MR_COMMENT"'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+# Similar to comment_on_merge_request job, however this will only run if a prior job has failed
+# Will surface a merge request comment, indicating a possible Terraform Cloud Run failure
+on_failure_merge_request_comment:
+  stage: ".post"
+  image: alpine/curl
+  variables:
+    MR_COMMENT: |
+      CI Failure
+      Run Status: "${run_status}"
+      Plan: ${add} to add, ${change} to change, ${destroy} to destroy.
+      [Terraform Cloud Plan](${run_link})
+  script:
+    - 'curl --fail-with-body --request POST --header "PRIVATE-TOKEN: $GITLAB_API_TOKEN" "https://gitlab.com/api/v4/projects/$CI_PROJECT_ID/merge_requests/$CI_MERGE_REQUEST_IID/notes" --data-urlencode "body=$MR_COMMENT"'
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+  when: on_failure
+
+# Terraform Cloud Run may not have errored, but could possibly have an undesirable status
+# Depending on threshold, can modify or remove for your use case
+check_run_status:
+  stage: ".post"
+  script:
+    - if [ "$run_status" != "planned_and_finished" ]; then exit 1; fi;
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+
+retrieve_secrets:
+    stage: vault
+    image: hashicorp/vault:latest
+    id_tokens:
+      VAULT_ID_TOKEN:
+        aud: https://gitlab.com
+    secrets:
+      ANSIBLE_CONTROLLER_TOKEN:
+        vault: gitlab/token@kv # authenticates using $VAULT_ID_TOKEN
+        file: false
+      ANSIBLE_VAULT_VAR:
+        vault: gitlab/ansible_var@kv
+        file: false
+    script:
+      - echo "ANSIBLE_CONTROLLER_TOKEN=$ANSIBLE_CONTROLLER_TOKEN" >> retrieve_secrets.env
+      - echo "ANSIBLE_VAULT_VAR=$ANSIBLE_VAULT_VAR" >> retrieve_secrets.env
+    artifacts:
+      reports:
+        dotenv: retrieve_secrets.env
+        
+# "extra_vars": "{\"value\": \"my_var\"}"
+apply_config:      # This job runs in the deploy stage.
+    stage: configure
+    image: alpine/curl
+    dependencies:
+      - retrieve_secrets
+    script:
+      - >
+        curl -k -H "Authorization: Bearer $ANSIBLE_CONTROLLER_TOKEN" -H "Content-Type: application/json" -X POST  -d '{"extra_vars": "{\"vault_var\": \"'"$ANSIBLE_VAULT_VAR"'\"}"}' https://$ANSIBLE_CONTROLLER_URL/api/v2/job_templates/15/launch/
